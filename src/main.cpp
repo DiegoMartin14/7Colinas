@@ -11,8 +11,8 @@ float temperaturaTanque1;
 char caracter = 'f';
 int estado = 0;
 const char *FIREBASE_PROJECT_ID = "***"; // Identificador de tu proyecto
-const char *FIREBASE_API_KEY = "***";    // Tu clave API
-const char *USER_EMAIL = "***";          // Correo electrónico del usuario
+const char *FIREBASE_API_KEY = "****";    // Tu clave API
+const char *USER_EMAIL = "****";          // Correo electrónico del usuario
 const char *USER_PASSWORD = "***";       // Contraseña del usuario
 
 FirebaseData firebaseData;
