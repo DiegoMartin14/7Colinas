@@ -1,88 +1,132 @@
-#include <Arduino.h>
 #include <WiFiManager.h>
-#include <FirebaseESP32.h>
-#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <FirebaseClient.h>
+#include <Arduino.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+#include <DNSServer.h>
+#include <ESP32Time.h>
+#include <secrets.h>
 
+// Definicion de variables
 int configWifi = 34; // entrada digital para configurar wifi
-int sensor1 = 36;    // entrada anañogica para el sensor de temperatura del tanque 1
-float rango = 10.24; //
-float dividirSensor;
-float temperaturaTanque1;
-char caracter = 'f';
 int estado = 0;
-const char *FIREBASE_PROJECT_ID = "***"; // Identificador de tu proyecto
-const char *FIREBASE_API_KEY = "****";    // Tu clave API
-const char *USER_EMAIL = "****";          // Correo electrónico del usuario
-const char *USER_PASSWORD = "***";       // Contraseña del usuario
+double temperatura;
+double tanque;
+unsigned long previousMillis = 0;
+unsigned long documentPreviousMillis = 0;
+const unsigned int documentCreationInterval = 3000;
+String fecha;
+String hora;
+// con esto obtengo la fecha y hora de un servidor NTP
+ESP32Time rtc;
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", -10800, 60000); // Servidor del Observatorio Naval Buenos Aires UTC-3 (Argentina)
 
-FirebaseData firebaseData;
-FirebaseAuth auth;
-FirebaseConfig config;
+// DE ACA PARA ABAJO ESTA LO QUE TIENE QUE VER CON FIRESTORE
+UserAuth user_auth(API_KEY, USUARIO_EMAIL, USUARIO_CONTRA, 3000);
+
+void asyncCB(AsyncResult &aResult);
+
+void printResult(AsyncResult &aResult);
+
+DefaultNetwork network; // Inicializar con un parámetro booleano para habilitar/deshabilitar la reconexión de red
+
+FirebaseApp app;
+
+WiFiClientSecure ssl_client; // es una clase que proporciona una conexión segura (usando SSL/TLS) a través de WiFi.
+
+using AsyncClient = AsyncClientClass; // Cambia de nombre
+
+AsyncClient aClient(ssl_client, getNetwork(network));
+
+Firestore::Documents Docs; // es parte de la plataforma Firebase y se utiliza para interactuar con la base de datos Firestore.
 
 void setup()
 {
     Serial.begin(115200);
 
-    // WiFiManager, inicialización local. Una vez que ha terminado su trabajo, no es necesario mantenerlo
+    // WiFiManager
     WiFiManager wm;
-
-    // restablecer la configuración - borrar las credenciales almacenadas para pruebas
-    // estas son almacenadas por la biblioteca esp
-    // wm.resetSettings();
-
-    // Conectar automáticamente usando las credenciales guardadas,
-    // si la conexión falla, inicia un punto de acceso con el nombre especificado ("AutoConnectAP"),
-    // si está vacío, generará automáticamente el SSID, si la contraseña está en blanco será un AP anónimo (wm.autoConnect())
-    // luego entra en un bucle de espera de configuración y devolverá el resultado de éxito
-
     bool res;
-    // res = wm.autoConnect(); // nombre de AP generado automáticamente a partir del chipid
-    // res = wm.autoConnect("AutoConnectAP"); // AP anónimo
-    res = wm.autoConnect("Microcontrolador"); // AP protegido con contraseña
-
+    res = wm.autoConnect("Microcontrolador");
     if (!res)
     {
-        Serial.println("Failed to connect"); // Falló la conexión
-        // ESP.restart();
+        Serial.println("Falló la conexion a wifi"); // Falló la conexión
+        ESP.restart();
     }
     else
     {
         // si llegas aquí, te has conectado al WiFi
-        Serial.println("connected...yeey :)"); // conectado... ¡yay! :)
+        Serial.println("Conectado a wifi:)"); // conectado... ¡yay! :)
     }
 
-    /*  // Configura las credenciales de Firebase
-      config.api_key = FIREBASE_API_KEY;
-      auth.user.email = USER_EMAIL;
-      auth.user.password = USER_PASSWORD;
+    // Configuracion de Firebase
+    Firebase.printf("Firebase Client v%s\n", FIREBASE_CLIENT_VERSION);
 
-      // Inicializa Firebase
-      Firebase.begin(&config, &auth);
-      //Firebase.reconnectWiFi(true);
+    Serial.println("Initializing app...");
 
-      // Espera hasta que se conecte a Firebase
-      Serial.print("Conectando a Firebase");
-      while (!Firebase.ready())
-      {
-          delay(1000);
-          Serial.print(".");
-      }
-      Serial.println();
-      Serial.println("Conexión a Firebase establecida");
-  */
-    // Configuración de los pines de entrada analógica
-    analogReadResolution(10);       // Resolución de 10 bits
-    analogSetAttenuation(ADC_11db); // Tensión de referencia de 3.3V
+#if defined(ESP32) || defined(ESP8266) || defined(PICO_RP2040) // Verifica si alguna de esas macros está definida
+    ssl_client.setInsecure();                                  // llama a una función llamada setInsecure() en un objeto llamado ssl_client
+#endif
+
+    initializeApp(aClient, app, getAuth(user_auth), asyncCB, "authTask"); // Se usa para inicializar una aplicación de Firebase con la configuración proporcionada
+
+    app.getApp<Firestore::Documents>(Docs);
+
+    // configuracion para horario
+    timeClient.begin();
+    configTime(-10800, 0, "europe.pool.ntp.org");
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo))
+    {
+        rtc.setTimeStruct(timeinfo);
+    }
+
+    // Configuración de los pines
     pinMode(LED_BUILTIN, OUTPUT);
     pinMode(configWifi, INPUT_PULLDOWN);
-    pinMode(sensor1, INPUT);
 }
 
 void loop()
 {
-    digitalWrite(LED_BUILTIN, HIGH);
-    delay(200);
+    app.loop();
+    Docs.loop();
+    // muestro fecha y hora actual
+    timeClient.update();
+    Serial.print("Hora: ");
+    Serial.println(timeClient.getFormattedTime()); // Muestra hora en terminal
+    Serial.print("Fecha: ");
+    Serial.println(rtc.getDate()); // Muestra fecha en terminal
+    delay(1000);
 
+    // Verifica si la aplicacion esta lista para usar
+    if (app.ready() && documentPreviousMillis < millis() - documentCreationInterval) // Verifica si ya pasaron 3 segundos de la ultima vez que se cargaron datos en la base
+    {
+        documentPreviousMillis = millis();
+
+        String documentPath = "Produccion/" + String(timeClient.getFormattedTime()); // Crea una coleccion llamada Produccion con un documento random en firebase
+
+        temperatura = ++temperatura; //esto se reemplaza por las mediciones reales de los tanques
+        tanque = ++tanque; //esto igual
+
+        fecha = (rtc.getDate());
+        hora = (timeClient.getFormattedTime());
+
+        Values::DoubleValue temperaturaValue(temperatura);
+        Values::DoubleValue tanqueValue(tanque);
+        Values::StringValue fechaValue(fecha);
+        Values::StringValue horaValue(hora);
+
+        Document<Values::Value>
+            doc("temperatura", Values::Value(temperaturaValue)); // Crea una coleccion llamada Temperatura con el valor que toma de la medicion
+        doc.add("Tanque", Values::Value(tanqueValue));           // Crea una coleccion llamada Tanque con el valor del numero de tanque al que se refiere la medicion
+        doc.add("Fecha", Values::Value(fechaValue));             // Crea una coleccion llamada Fecha con la fecha actual
+        doc.add("Hora", Values::Value(horaValue));
+        Docs.createDocument(aClient, Firestore::Parent(FIREBASE_PROYECTO_ID), documentPath, DocumentMask(), doc, asyncCB, "Documento creado  \n");
+    }
+
+    // Configurar una nueva red presionando un boton
     estado = digitalRead(configWifi);
     if (estado == 1)
     {
@@ -106,47 +150,42 @@ void loop()
 
         if (!res)
         {
-            Serial.println("Failed to connect"); // Falló la conexión
-            // ESP.restart();
+            Serial.println("Falló la conexion a wifi"); // Falló la conexión
+            ESP.restart();
         }
         else
         {
             // si llegas aquí, te has conectado al WiFi
-            Serial.println("connected...yeey :)"); // conectado... ¡yay! :)
+            Serial.println("Conectado a wifi:)"); // conectado... ¡yay! :)
         }
     }
+}
 
-    if (Serial.available() > 0)
-    {                             // Verificar si hay datos disponibles para leer
-        caracter = Serial.read(); // Leer un caracter desde el monitor serie
-    }
+void asyncCB(AsyncResult &aResult)
+{
+    printResult(aResult);
+}
 
-    if (caracter == 't')
+void printResult(AsyncResult &aResult)
+{
+    if (aResult.isEvent())
     {
-        Serial.print("Temperatura del tanque 1: ");
-        Serial.println(temperaturaTanque1);
-        caracter = 'f';
-
-        /*   // Construye el objeto JSON
-           FirebaseJson json;
-           json.set("timestamp", millis());
-           json.set("temperature", temperaturaTanque1);
-
-           // Envía los datos a una nueva colección y documento en Firestore
-           String documentPath = "sensores/temperatura_" + String(millis()); // Cambia esto a tu colección y documento
-           if (Firebase.Firestore.createDocument(&firebaseData, FIREBASE_PROJECT_ID, "", documentPath, json.raw()))
-           {
-               Serial.println("Datos enviados exitosamente a Firestore");
-           }
-           else
-           {
-               Serial.println("Error al enviar datos a Firestore");
-               Serial.println(firebaseData.errorReason());
-           }*/
+        Firebase.printf("Event task: %s, msg: %s, code: %d\n", aResult.uid().c_str(), aResult.appEvent().message().c_str(), aResult.appEvent().code());
     }
-    dividirSensor = analogRead(sensor1);
-    temperaturaTanque1 = dividirSensor / rango;
 
-    digitalWrite(LED_BUILTIN, LOW);
-    delay(200);
+    if (aResult.isDebug())
+    {
+        Firebase.printf("Debug task: %s, msg: %s\n", aResult.uid().c_str(), aResult.debug().c_str());
+    }
+
+    if (aResult.isError())
+    {
+        Firebase.printf("Error task: %s, msg: %s, code: %d\n", aResult.uid().c_str(), aResult.error().message().c_str(), aResult.error().code());
+    }
+
+    if (aResult.available())
+    {
+        Firebase.printf("task: %s", aResult.uid().c_str());
+        //, payload : % s\n ", aResult.uid().c_str(), aResult.c_str());
+    }
 }
