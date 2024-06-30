@@ -7,10 +7,11 @@
 #include <DNSServer.h>
 #include <ESP32Time.h>
 #include <secrets.h>
+#include <WebSocketsServer.h>
+#include <FS.h>
+#include <SPIFFS.h>
 
 // Definicion de variables
-int configWifi = 34; // entrada digital para configurar wifi
-int estado = 0;
 double temperatura;
 double tanque;
 unsigned long previousMillis = 0;
@@ -18,6 +19,13 @@ unsigned long documentPreviousMillis = 0;
 const unsigned int documentCreationInterval = 3000;
 String fecha;
 String hora;
+
+// Inicializa el servidor WebSocket en el puerto 81
+String header;
+unsigned long lastTime, timeout = 2000;
+WiFiServer server(80);
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t *payload, size_t length);
+
 // con esto obtengo la fecha y hora de un servidor NTP
 ESP32Time rtc;
 WiFiUDP ntpUDP;
@@ -85,11 +93,87 @@ void setup()
 
     // Configuración de los pines
     pinMode(LED_BUILTIN, OUTPUT);
-    pinMode(configWifi, INPUT_PULLDOWN);
+    // Inicia el servidor web
+    server.begin();
 }
 
 void loop()
 {
+    //comienza pagina web
+    WiFiClient client = server.available();
+
+    if (client)
+    {
+        lastTime = millis();
+
+        Serial.println("Nuevo cliente");
+        String currentLine = "";
+
+        while (client.connected() && millis() - lastTime <= timeout)
+        {
+
+            if (client.available())
+            {
+
+                char c = client.read();
+                Serial.write(c);
+                header += c;
+
+                if (c == '\n')
+                {
+
+                    if (currentLine.length() == 0)
+                    {
+
+                        ////////// ENCABEZADO HTTP ////////////
+
+                        client.println("HTTP/1.1 200 OK");
+                        client.println("Content-type:text/html");
+                        client.println("Connection: close");
+                        client.println();
+
+                        if (header.indexOf("GET /configWifi") >= 0)
+                        {
+                            WiFiManager wm;
+                            wm.resetSettings();
+                            ESP.restart();
+                        }
+
+                        //////// PAGINA WEB //////////////
+
+                        client.println("<!DOCTYPE html><html>");
+                        client.println("<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+                        client.println("<link rel=\"icon\" href=\"data:,\">");
+                        client.println("</head>");
+
+                        client.println("<body></body>");
+
+                        client.println("</html>");
+
+                        client.println();
+                        break;
+
+                        /////////////////////////////////////
+                    }
+                    else
+                    {
+                        currentLine = "";
+                    }
+                }
+                else if (c != '\r')
+                {
+                    currentLine += c;
+                }
+            }
+        }
+
+        header = "";
+        client.stop();
+        Serial.println("Cliente desconectado.");
+        Serial.println("");
+    }
+
+    // termina pagina web y comienza el resto
     app.loop();
     Docs.loop();
     // muestro fecha y hora actual
@@ -105,10 +189,10 @@ void loop()
     {
         documentPreviousMillis = millis();
 
-        String documentPath = "Produccion/" + String(timeClient.getFormattedTime()); // Crea una coleccion llamada Produccion con un documento random en firebase
+        String documentPath = "Produccion/" + String(timeClient.getEpochTime()); // Crea una coleccion llamada Produccion con un documento random en firebase
 
-        temperatura = ++temperatura; //esto se reemplaza por las mediciones reales de los tanques
-        tanque = ++tanque; //esto igual
+        temperatura = ++temperatura; // esto se reemplaza por las mediciones reales de los tanques
+        tanque = ++tanque;           // esto igual
 
         fecha = (rtc.getDate());
         hora = (timeClient.getFormattedTime());
@@ -124,40 +208,6 @@ void loop()
         doc.add("Fecha", Values::Value(fechaValue));             // Crea una coleccion llamada Fecha con la fecha actual
         doc.add("Hora", Values::Value(horaValue));
         Docs.createDocument(aClient, Firestore::Parent(FIREBASE_PROYECTO_ID), documentPath, DocumentMask(), doc, asyncCB, "Documento creado  \n");
-    }
-
-    // Configurar una nueva red presionando un boton
-    estado = digitalRead(configWifi);
-    if (estado == 1)
-    {
-        estado = 0;
-        // WiFiManager, inicialización local. Una vez que ha terminado su trabajo, no es necesario mantenerlo
-        WiFiManager wm;
-
-        // restablecer la configuración - borrar las credenciales almacenadas para pruebas
-        // estas son almacenadas por la biblioteca esp
-        wm.resetSettings();
-
-        // Conectar automáticamente usando las credenciales guardadas,
-        // si la conexión falla, inicia un punto de acceso con el nombre especificado ("AutoConnectAP"),
-        // si está vacío, generará automáticamente el SSID, si la contraseña está en blanco será un AP anónimo (wm.autoConnect())
-        // luego entra en un bucle de espera de configuración y devolverá el resultado de éxito
-
-        bool res;
-        // res = wm.autoConnect(); // nombre de AP generado automáticamente a partir del chipid
-        // res = wm.autoConnect("AutoConnectAP"); // AP anónimo
-        res = wm.autoConnect("Microcontrolador"); // AP protegido con contraseña
-
-        if (!res)
-        {
-            Serial.println("Falló la conexion a wifi"); // Falló la conexión
-            ESP.restart();
-        }
-        else
-        {
-            // si llegas aquí, te has conectado al WiFi
-            Serial.println("Conectado a wifi:)"); // conectado... ¡yay! :)
-        }
     }
 }
 
