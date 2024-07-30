@@ -1,15 +1,21 @@
 #include <WiFiManager.h>
+#include <ESPAsyncWebServer.h>
 #include <WiFiClientSecure.h>
-#include <FirebaseClient.h>
 #include <Arduino.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <DNSServer.h>
 #include <ESP32Time.h>
 #include <secrets.h>
-#include <WebSocketsServer.h>
 #include <FS.h>
 #include <SPIFFS.h>
+#include <WebSocketsServer.h>
+// #include <FirebaseClient.h>
+#include <FirebaseESP32.h>
+#include <ArduinoJson.h>
+#include <AsyncTCP.h>
+#include <map>
+#include <AsyncWebSocket.h>
 
 // Definicion de variables
 double temperatura;
@@ -19,36 +25,147 @@ unsigned long documentPreviousMillis = 0;
 const unsigned int documentCreationInterval = 3000;
 String fecha;
 String hora;
+int currentTank = 1;
 
-// Inicializa el servidor WebSocket en el puerto 81
-String header;
-unsigned long lastTime, timeout = 2000;
-WiFiServer server(80);
-void webSocketEvent(uint8_t num, WStype_t type, uint8_t *payload, size_t length);
+// Firebase variables
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+FirebaseJson json;
+
+////////////////7 comienzo la prueba del server ///////////////////////////////77
+AsyncWebServer server(80);
+AsyncWebSocket webSocket("/ws");
+struct AlarmSettings
+{
+    float minTemp;
+    float maxTemp;
+};
+
+// Memory to store alarm settings for each tank
+AlarmSettings alarmSettings[6];
+
+void onRequest(AsyncWebServerRequest *request)
+{
+    // Handle Unknown Request
+    request->send(404, "text/plain", "Not found");
+}
+
+// Función para manejar solicitudes HTTP para configurar valores de alarma
+void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len)
+{
+    if (type == WS_EVT_DATA)
+    {
+        AwsFrameInfo *info = (AwsFrameInfo *)arg;
+        if (info->opcode == WS_TEXT)
+        {
+            data[len] = 0;
+            String message = (char *)data;
+            if (message == "getData")
+            {
+                // Obtener datos de Firestore y enviarlos al cliente
+                String path = "/Producción/Tanque" + String(currentTank);
+                if (Firebase.getJSON(fbdo, path.c_str()))
+                {
+                    if (fbdo.dataType() == "json")
+                    {
+                        String jsonString;
+                        fbdo.jsonObject().toString(jsonString, true);
+                        client->text(jsonString);
+                    }
+                    else
+                    {
+                        client->text("Error retrieving data");
+                    }
+                }
+                else
+                {
+                    client->text(fbdo.errorReason());
+                }
+            }
+        }
+    }
+}
+
+// Función para obtener los datos del tanque
+void handleGetTankData(AsyncWebServerRequest *request)
+{
+    if (request->hasParam("tank"))
+    {
+        int tankId = request->getParam("tank")->value().toInt();
+        // Aquí obtienes los datos del tanque desde Firestore o alguna variable
+        String temperature = String(temperatura); // Ejemplo, reemplaza con el valor real
+        String date = fecha;                      // Ejemplo, reemplaza con el valor real
+        String time = hora;                       // Ejemplo, reemplaza con el valor real
+
+        String jsonResponse = "{\"temperature\": \"" + temperature + "\", \"date\": \"" + date + "\", \"time\": \"" + time + "\"}";
+        request->send(200, "application/json", jsonResponse);
+    }
+    else
+    {
+        request->send(400, "text/plain", "Bad Request");
+    }
+}
+
+// Función para configurar la alarma de temperatura
+void handleSetAlarm(AsyncWebServerRequest *request)
+{
+    if (request->hasParam("tank", true) && request->hasParam("minTemp", true) && request->hasParam("maxTemp", true))
+    {
+        int tank = request->getParam("tank", true)->value().toInt();
+        float minTemp = request->getParam("minTemp", true)->value().toFloat();
+        float maxTemp = request->getParam("maxTemp", true)->value().toFloat();
+
+        // Update the local alarm settings
+        alarmSettings[tank - 1].minTemp = minTemp;
+        alarmSettings[tank - 1].maxTemp = maxTemp;
+
+        // Send response
+        request->send(200, "text/plain", "Alarm settings updated");
+    }
+    else
+    {
+        request->send(400, "text/plain", "Bad Request");
+    }
+}
+
+// Función para obtener la configuración de alarma de un tanque
+void handleGetAlarmSettings(AsyncWebServerRequest *request)
+{
+    if (request->hasParam("tank"))
+    {
+        int tank = request->getParam("tank")->value().toInt();
+        float minTemp = alarmSettings[tank - 1].minTemp;
+        float maxTemp = alarmSettings[tank - 1].maxTemp;
+
+        // Create JSON response
+        String jsonResponse;
+        JsonDocument doc;
+        doc["minTemp"] = minTemp;
+        doc["maxTemp"] = maxTemp;
+        serializeJson(doc, jsonResponse);
+
+        request->send(200, "application/json", jsonResponse);
+    }
+    else
+    {
+        request->send(400, "text/plain", "Bad Request");
+    }
+}
+
+// Función para reiniciar el ESP32
+void handleReset(AsyncWebServerRequest *request)
+{
+    request->send(200, "text/plain", "Reiniciando ESP32...");
+    ESP.restart();
+}
+
+//////////////// termino la prueba del server //////////////////////////////////
 
 // con esto obtengo la fecha y hora de un servidor NTP
 ESP32Time rtc;
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", -10800, 60000); // Servidor del Observatorio Naval Buenos Aires UTC-3 (Argentina)
-
-// DE ACA PARA ABAJO ESTA LO QUE TIENE QUE VER CON FIRESTORE
-UserAuth user_auth(API_KEY, USUARIO_EMAIL, USUARIO_CONTRA, 3000);
-
-void asyncCB(AsyncResult &aResult);
-
-void printResult(AsyncResult &aResult);
-
-DefaultNetwork network; // Inicializar con un parámetro booleano para habilitar/deshabilitar la reconexión de red
-
-FirebaseApp app;
-
-WiFiClientSecure ssl_client; // es una clase que proporciona una conexión segura (usando SSL/TLS) a través de WiFi.
-
-using AsyncClient = AsyncClientClass; // Cambia de nombre
-
-AsyncClient aClient(ssl_client, getNetwork(network));
-
-Firestore::Documents Docs; // es parte de la plataforma Firebase y se utiliza para interactuar con la base de datos Firestore.
 
 void setup()
 {
@@ -69,18 +186,13 @@ void setup()
         Serial.println("Conectado a wifi:)"); // conectado... ¡yay! :)
     }
 
-    // Configuracion de Firebase
-    Firebase.printf("Firebase Client v%s\n", FIREBASE_CLIENT_VERSION);
-
-    Serial.println("Initializing app...");
-
-#if defined(ESP32) || defined(ESP8266) || defined(PICO_RP2040) // Verifica si alguna de esas macros está definida
-    ssl_client.setInsecure();                                  // llama a una función llamada setInsecure() en un objeto llamado ssl_client
-#endif
-
-    initializeApp(aClient, app, getAuth(user_auth), asyncCB, "authTask"); // Se usa para inicializar una aplicación de Firebase con la configuración proporcionada
-
-    app.getApp<Firestore::Documents>(Docs);
+    // Inicializar SPIFFS
+    if (!SPIFFS.begin(true))
+    {
+        Serial.println("Error al montar SPIFFS");
+        return;
+    }
+    Serial.println("SPIFFS montado correctamente");
 
     // configuracion para horario
     timeClient.begin();
@@ -91,91 +203,39 @@ void setup()
         rtc.setTimeStruct(timeinfo);
     }
 
-    // Configuración de los pines
-    pinMode(LED_BUILTIN, OUTPUT);
-    // Inicia el servidor web
+    // Configuracion de Firebase
+    config.api_key = API_KEY;
+    auth.user.email = USUARIO_EMAIL;
+    auth.user.password = USUARIO_CONTRA;
+    config.database_url = DATABASE_URL;
+    
+    Firebase.begin(&config, &auth);
+    Firebase.reconnectWiFi(true);
+
+    Serial.println("CONECTADO ");
+
+    // Initialize WebSocket
+    webSocket.onEvent(onWsEvent);
+    server.addHandler(&webSocket);
+
+    // Route for setting alarm values
+    server.on("/setAlarm", HTTP_POST, handleSetAlarm);
+
+    // Route for getting alarm values
+    server.on("/getAlarmSettings", HTTP_GET, handleGetAlarmSettings);
+
+    // Serve static files
+    server.serveStatic("/", SPIFFS, "/").setDefaultFile("index.html");
+
+    // Start the server
     server.begin();
 }
 
 void loop()
 {
-    //comienza pagina web
-    WiFiClient client = server.available();
+    webSocket.cleanupClients();
+    Firebase.ready();
 
-    if (client)
-    {
-        lastTime = millis();
-
-        Serial.println("Nuevo cliente");
-        String currentLine = "";
-
-        while (client.connected() && millis() - lastTime <= timeout)
-        {
-
-            if (client.available())
-            {
-
-                char c = client.read();
-                Serial.write(c);
-                header += c;
-
-                if (c == '\n')
-                {
-
-                    if (currentLine.length() == 0)
-                    {
-
-                        ////////// ENCABEZADO HTTP ////////////
-
-                        client.println("HTTP/1.1 200 OK");
-                        client.println("Content-type:text/html");
-                        client.println("Connection: close");
-                        client.println();
-
-                        if (header.indexOf("GET /configWifi") >= 0)
-                        {
-                            WiFiManager wm;
-                            wm.resetSettings();
-                            ESP.restart();
-                        }
-
-                        //////// PAGINA WEB //////////////
-
-                        client.println("<!DOCTYPE html><html>");
-                        client.println("<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-                        client.println("<link rel=\"icon\" href=\"data:,\">");
-                        client.println("</head>");
-
-                        client.println("<body></body>");
-
-                        client.println("</html>");
-
-                        client.println();
-                        break;
-
-                        /////////////////////////////////////
-                    }
-                    else
-                    {
-                        currentLine = "";
-                    }
-                }
-                else if (c != '\r')
-                {
-                    currentLine += c;
-                }
-            }
-        }
-
-        header = "";
-        client.stop();
-        Serial.println("Cliente desconectado.");
-        Serial.println("");
-    }
-
-    // termina pagina web y comienza el resto
-    app.loop();
-    Docs.loop();
     // muestro fecha y hora actual
     timeClient.update();
     Serial.print("Hora: ");
@@ -185,57 +245,31 @@ void loop()
     delay(1000);
 
     // Verifica si la aplicacion esta lista para usar
-    if (app.ready() && documentPreviousMillis < millis() - documentCreationInterval) // Verifica si ya pasaron 3 segundos de la ultima vez que se cargaron datos en la base
+    if (millis() - documentPreviousMillis > documentCreationInterval)
     {
         documentPreviousMillis = millis();
 
-        String documentPath = "Produccion/" + String(timeClient.getEpochTime()); // Crea una coleccion llamada Produccion con un documento random en firebase
+        String documentPath = "/Producción/" + String(timeClient.getEpochTime()); // Crea una coleccion llamada Produccion con un documento random en firebase
 
         temperatura = ++temperatura; // esto se reemplaza por las mediciones reales de los tanques
         tanque = ++tanque;           // esto igual
 
-        fecha = (rtc.getDate());
-        hora = (timeClient.getFormattedTime());
+        fecha = rtc.getDate();
+        hora = timeClient.getFormattedTime();
 
-        Values::DoubleValue temperaturaValue(temperatura);
-        Values::DoubleValue tanqueValue(tanque);
-        Values::StringValue fechaValue(fecha);
-        Values::StringValue horaValue(hora);
+        json.clear();
+        json.add("temperatura", temperatura);
+        json.add("tanque", tanque);
+        json.add("fecha", fecha);
+        json.add("hora", hora);
 
-        Document<Values::Value>
-            doc("temperatura", Values::Value(temperaturaValue)); // Crea una coleccion llamada Temperatura con el valor que toma de la medicion
-        doc.add("Tanque", Values::Value(tanqueValue));           // Crea una coleccion llamada Tanque con el valor del numero de tanque al que se refiere la medicion
-        doc.add("Fecha", Values::Value(fechaValue));             // Crea una coleccion llamada Fecha con la fecha actual
-        doc.add("Hora", Values::Value(horaValue));
-        Docs.createDocument(aClient, Firestore::Parent(FIREBASE_PROYECTO_ID), documentPath, DocumentMask(), doc, asyncCB, "Documento creado  \n");
-    }
-}
-
-void asyncCB(AsyncResult &aResult)
-{
-    printResult(aResult);
-}
-
-void printResult(AsyncResult &aResult)
-{
-    if (aResult.isEvent())
-    {
-        Firebase.printf("Event task: %s, msg: %s, code: %d\n", aResult.uid().c_str(), aResult.appEvent().message().c_str(), aResult.appEvent().code());
-    }
-
-    if (aResult.isDebug())
-    {
-        Firebase.printf("Debug task: %s, msg: %s\n", aResult.uid().c_str(), aResult.debug().c_str());
-    }
-
-    if (aResult.isError())
-    {
-        Firebase.printf("Error task: %s, msg: %s, code: %d\n", aResult.uid().c_str(), aResult.error().message().c_str(), aResult.error().code());
-    }
-
-    if (aResult.available())
-    {
-        Firebase.printf("task: %s", aResult.uid().c_str());
-        //, payload : % s\n ", aResult.uid().c_str(), aResult.c_str());
+        if (Firebase.pushJSON(fbdo, documentPath.c_str(), json))
+        {
+            Serial.println("Datos enviados a Firebase");
+        }
+        else
+        {
+            Serial.println("Error al enviar datos: " + fbdo.errorReason());
+        }
     }
 }

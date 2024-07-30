@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" href="data:,">
+    <style>
+        /* Estilos CSS para la página web */
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+
+        h1 {
+            color: #333;
+        }
+
+        .button {
+            margin: 10px;
+            padding: 10px;
+            background-color: #4CAF50;
+            color: rgb(255, 255, 255);
+            border: none;
+            cursor: pointer;
+        }
+
+        .download-button {
+            margin: 10px;
+            padding: 10px;
+            background-color: #4CAF50;
+            color: rgb(255, 255, 255);
+            border: none;
+            cursor: pointer;
+        }
+
+        .sidebar {
+            height: 100%;
+            width: 200px;
+            position: fixed;
+            top: 0;
+            left: 0;
+            background-color: #111;
+            overflow-x: hidden;
+            padding-top: 20px;
+        }
+
+        .sidebar a {
+            padding: 10px;
+            text-decoration: none;
+            font-size: 18px;
+            color: #818181;
+            display: block;
+        }
+
+        .sidebar a:hover {
+            color: #f1f1f1;
+        }
+
+        .main {
+            margin-left: 200px;
+            padding: 20px;
+        }
+
+        #data {
+            margin: 20px 0;
+        }
+
+        form {
+            margin: 20px 0;
+        }
+    </style>
+    <script>
+        var currentTank = 1; // Tanque inicialmente seleccionado
+        var ws;
+
+        // Función para mostrar el tanque seleccionado y sus datos
+        function showTank(tankId) {
+            currentTank = tankId;
+            document.getElementById('tankTitle').textContent = 'Tanque ' + tankId;
+
+            // Solicitar datos a través de WebSocket
+            ws.send('getData');
+        }
+
+        // Función para manejar la conexión WebSocket
+        function initWebSocket() {
+            ws = new WebSocket('ws://' + window.location.hostname + '/ws');
+
+            ws.onopen = function () {
+                console.log('WebSocket connection established');
+                ws.send('getData');
+            };
+
+            ws.onmessage = function (event) {
+                document.getElementById('data').innerHTML = event.data;
+                updateAlarmSettings(currentTank); // Llama a la función para actualizar los valores de alarma
+            };
+
+            ws.onclose = function () {
+                console.log('WebSocket connection closed');
+                setTimeout(initWebSocket, 1000);
+            };
+        }
+
+        // Función para enviar los valores de temperatura mínima y máxima al microcontrolador
+        function setVariable(tankId) {
+            var minTemp = document.getElementById('minTemp').value;
+            var maxTemp = document.getElementById('maxTemp').value;
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', '/setAlarm', true);
+            xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+            xhr.send('tank=' + tankId + '&minTemp=' + minTemp + '&maxTemp=' + maxTemp);
+            document.getElementById('minTemp').value = '';
+            document.getElementById('maxTemp').value = '';
+            updateAlarmSettings(tankId);
+        }
+
+        // Función para actualizar y mostrar los valores de alarma configurados para el tanque seleccionado
+        function updateAlarmSettings(tankId) {
+            var xhr = new XMLHttpRequest();
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState == 4 && xhr.status == 200) {
+                    var response = JSON.parse(xhr.responseText);
+                    document.getElementById('alarmSettings').textContent = 'Min: ' + response.minTemp + ', Max: ' + response.maxTemp;
+                }
+            };
+            xhr.open('GET', '/getAlarmSettings?tank=' + tankId, true);
+            xhr.send();
+        }
+
+        // Función para descargar el informe
+        function downloadReport() {
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '/download', true);
+            xhr.responseType = 'blob';
+            xhr.onload = function () {
+                if (xhr.status === 200) {
+                    var url = window.URL.createObjectURL(xhr.response);
+                    var a = document.createElement('a');
+                    a.href = url;
+                    a.download = 'informe.csv';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                }
+            };
+            xhr.send();
+        }
+
+        // Función para resetear el ESP32
+        function resetESP32() {
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '/reset', true);
+            xhr.send();
+            alert('Reiniciando ESP32...');
+        }
+
+        // Inicializar WebSocket al cargar la página
+        window.onload = function () {
+            initWebSocket();
+            showTank(1);
+        };
+    </script>
+</head>
+
+<body>
+    <!-- Barra lateral con nombres de los tanques -->
+    <div class="sidebar">
+        <a href="#" onclick="showTank(1)">Tanque 1</a>
+        <a href="#" onclick="showTank(2)">Tanque 2</a>
+        <a href="#" onclick="showTank(3)">Tanque 3</a>
+        <a href="#" onclick="showTank(4)">Tanque 4</a>
+        <a href="#" onclick="showTank(5)">Tanque 5</a>
+        <a href="#" onclick="showTank(6)">Tanque 6</a>
+        <button class="button" onclick="resetESP32()">Resetear ESP32</button>
+    </div>
+
+    <!-- Contenido principal -->
+    <div class="main">
+        <h1>Bienvenido al monitoreo de 7 Colinas</h1>
+
+        <div id="temperatures">
+            <h2>Informacion del tanque</h2>
+            <div id="data">Selecciona un tanque para ver sus datos.</div>
+
+            <h3 id="tankTitle">Tanque 1</h3>
+            <h4>Configurar Alarma</h4>
+            <form id="alarmForm" onsubmit="setVariable(currentTank); return false;">
+                Min: <input type="text" id="minTemp">
+                Max: <input type="text" id="maxTemp">
+                <input type="submit" value="Setear">
+            </form>
+            <div id="alarmSettings">Min: , Max: </div>
+        </div>
+
+        <button class="button download-button" onclick="downloadReport()">Descargar Informe</button>
+    </div>
+
+</body>
+
+</html>
